@@ -362,180 +362,143 @@ SLOT_TIMINGS_MAP = {
     4: "16:00 TO 17:30",
 }
 
-@st.cache_data
-def load_master_data():
-    files = [f for f in os.listdir(".") if f.endswith(".xlsx") and not f.startswith("~")]
-    if not files:
-        st.error("No `.xlsx` timetable spreadsheet found in the directory.")
-        st.stop()
+# =============================================================
+# SUPABASE-NATIVE DATA LOADER (ZERO EXCEL AT RUNTIME)
+# =============================================================
+@st.cache_data(ttl=120)
+def load_supabase_master_data():
+    if not supabase_client:
+        return [], [], {}, {}
 
-    file_path = files[0]
-    wb = openpyxl.load_workbook(file_path, data_only=True)
-
-    df_fw = pd.read_excel(file_path, sheet_name="Faculty Work Load ")
-    raw_faculties = df_fw["Faculty Name "].dropna().unique().tolist()
-
-    official_faculty_list = []
-    first_name_to_full = {}
-    first_name_to_code = {}
-
-    for f in raw_faculties:
-        full = " ".join(str(f).split())
-        tokens = [t.lower().strip("().,") for t in full.split()]
-        tokens = [t for t in tokens if t not in ["dr", "mr", "ms", "prof"]]
-        if tokens:
-            fn = tokens[0]
-            first_name_to_full[fn] = full
-            official_faculty_list.append(full)
-            for k_erp, code_erp in DEFAULT_FACULTY_LIST.items():
-                if fn in k_erp.lower():
-                    first_name_to_code[fn] = code_erp
-                    break
-
-    official_faculty_list = sorted(list(set(official_faculty_list)))
-
-    target_sheet = "Morning_Afternoon Updated_Timet"
-    matched_sheet_name = next(
-        (s for s in wb.sheetnames if target_sheet.lower() in s.lower().strip()),
-        wb.sheetnames[1] if len(wb.sheetnames) > 1 else wb.sheetnames[0],
+    # 1. Fetch Even Semester Calendar from academic_days
+    days_res = (
+        supabase_client.table("academic_days")
+        .select("date, week_label, day_name, is_instructional")
+        .eq("semester_type", "EVEN")
+        .order("date")
+        .execute()
     )
-    ws = wb[matched_sheet_name]
+    academic_days = days_res.data or []
 
-    month_map = {
-        "jul": 7, "july": 7,
-        "aug": 8, "august": 8,
-        "sep": 9, "sept": 9, "september": 9,
-        "oct": 10, "october": 10,
-        "nov": 11, "november": 11,
-        "dec": 12, "december": 12,
-    }
     calendar_cols = []
+    for d in academic_days:
+        d_obj = datetime.date.fromisoformat(d["date"])
+        w_lbl = d.get("week_label") or "Week"
+        calendar_cols.append({
+            "col": len(calendar_cols) + 1,
+            "date": d_obj,
+            "week": w_lbl,
+            "day_name": d.get("day_name", d_obj.strftime("%a")),
+            "is_instructional": d.get("is_instructional", True),
+            "label": f"{d_obj.strftime('%a, %d %b %Y')} ({w_lbl})",
+        })
 
-    for col in range(1, ws.max_column + 1):
-        m_val = ws.cell(3, col).value
-        d_val = ws.cell(4, col).value
-        w_val = ws.cell(5, col).value
+    # 2. Fetch Active Faculty Roster
+    fac_res = (
+        supabase_client.table("faculties")
+        .select("faculty_code, name, first_name_alias, active_until, is_available_for_substitution")
+        .eq("is_active", True)
+        .order("name")
+        .execute()
+    )
+    db_faculties = fac_res.data or []
+    official_faculty_list = [f["name"] for f in db_faculties]
+    code_to_name = {f["faculty_code"]: f["name"] for f in db_faculties}
 
-        if d_val is not None:
-            d_str = str(d_val).strip().split(".")[0]
-            if d_str.isdigit():
-                day_int = int(d_str)
-                m_str = str(m_val or "").strip().lower()
-                matched_month = next((month_map[k] for k in month_map if k in m_str), None)
-                if matched_month:
-                    w_str = str(w_val).strip() if w_val else "Week"
-                    try:
-                        d_obj = datetime.date(2026, matched_month, day_int)
-                        calendar_cols.append({
-                            "col": col,
-                            "date": d_obj,
-                            "week": w_str,
-                            "label": f"{d_obj.strftime('%a, %d %b %Y')} ({w_str})",
-                        })
-                    except ValueError:
-                        continue
+    # 3. Fetch Courses Catalog
+    course_res = (
+        supabase_client.table("courses")
+        .select("course_code, title, short_title, semester, semester_type")
+        .execute()
+    )
+    courses_lookup = {c["course_code"]: (c.get("short_title") or c.get("title") or c["course_code"]) for c in (course_res.data or [])}
 
-    teaching_rows = [
-        (14, "UG-Sem 3", "A", "Morning", 8),
-        (15, "UG-Sem 3", "A", "Afternoon", 8),
-        (16, "UG-Sem 3", "B", "Morning", 8),
-        (17, "UG-Sem 3", "B", "Afternoon", 8),
-        (18, "UG-Sem 3", "C", "Morning", 8),
-        (19, "UG-Sem 3", "C", "Afternoon", 8),
-        (20, "UG-Sem 3", "D", "Morning", 8),
-        (21, "UG-Sem 3", "D", "Afternoon", 8),
-        (22, "UG-Sem 3", "E", "Morning", 8),
-        (23, "UG-Sem 3", "E", "Afternoon", 8),
-        (33, "UG-Sem 5", "A", "Morning", 30),
-        (34, "UG-Sem 5", "A", "Afternoon", 30),
-        (35, "UG-Sem 5", "B", "Morning", 30),
-        (36, "UG-Sem 5", "B", "Afternoon", 30),
-        (37, "UG-Sem 5", "C", "Morning", 30),
-        (38, "UG-Sem 5", "C", "Afternoon", 30),
-        (39, "UG-Sem 5", "D", "Morning", 30),
-        (40, "UG-Sem 5", "D", "Afternoon", 30),
-        (51, "UG-Sem 7", "A", "Lead", 48),
-        (52, "UG-Sem 7", "A", "Assisting", 48),
-        (53, "UG-Sem 7", "B", "Lead", 48),
-        (54, "UG-Sem 7", "B", "Assisting", 48),
-        (55, "UG-Sem 7", "C", "Lead", 48),
-        (56, "UG-Sem 7", "C", "Assisting", 48),
-        (65, "PG-Sem 1", "Combined", "Full Day", 62),
-        (74, "PG-Sem 3", "Combined", "Full Day", 71),
-    ]
+    # 4. Fetch All Timetable Slots
+    slots = []
+    start_idx = 0
+    page_size = 1000
+    while True:
+        res = (
+            supabase_client.table("timetable_slots")
+            .select("date, cohort, section, slot_num, course_code, faculty_code, classification, is_off")
+            .range(start_idx, start_idx + page_size - 1)
+            .execute()
+        )
+        batch = res.data or []
+        slots.extend(batch)
+        if len(batch) < page_size:
+            break
+        start_idx += page_size
 
+    # 5. Build In-Memory Availability & Cohort Structures
     faculty_day_schedule = {f: {} for f in official_faculty_list}
     cohort_day_schedule = {}
 
-    for c_info in calendar_cols:
-        col = c_info["col"]
-        dt = c_info["date"]
+    for s in slots:
+        dt = datetime.date.fromisoformat(s["date"])
+        cohort = s["cohort"]
+        sec = s["section"]
+        slot_num = s["slot_num"]
+        c_code = s["course_code"]
+        f_code = s["faculty_code"]
+        is_off = s.get("is_off", False)
+
+        c_title = courses_lookup.get(c_code, c_code or "—")
+        fac_name = code_to_name.get(f_code, f_code or "Visiting / None")
+
         if dt not in cohort_day_schedule:
             cohort_day_schedule[dt] = {}
+        if cohort not in cohort_day_schedule[dt]:
+            cohort_day_schedule[dt][cohort] = {}
+        if sec not in cohort_day_schedule[dt][cohort]:
+            cohort_day_schedule[dt][cohort][sec] = {
+                "module": "",
+                "morning": None,
+                "afternoon": None,
+                "faculty_name_m": None,
+                "faculty_name_a": None,
+                "faculties_all_day": [],
+                "is_off": is_off
+            }
 
-        for r, cohort, sec, slot, mod_r in teaching_rows:
-            cell_val = ws.cell(r, col).value
-            if cell_val is not None and str(cell_val).strip() not in ["", "None", "-"]:
-                txt = str(cell_val).strip()
-                mod_name = str(ws.cell(mod_r, col).value or "").strip()
-                clean_mod = " ".join(mod_name.split())
+        sec_ref = cohort_day_schedule[dt][cohort][sec]
 
-                cell_tokens = [re.sub(r"[^a-zA-Z]", "", w).lower() for w in txt.split()]
-                matched_faculty = None
-                faculty_code = None
+        if slot_num in [1, 2]:
+            if c_title and c_title != "—":
+                sec_ref["module"] = c_title
+            sec_ref["morning"] = f_code
+            sec_ref["faculty_name_m"] = fac_name
+            session_lbl = "Morning"
+        else:
+            if not sec_ref["module"] and c_title and c_title != "—":
+                sec_ref["module"] = c_title
+            sec_ref["afternoon"] = f_code
+            sec_ref["faculty_name_a"] = fac_name
+            session_lbl = "Afternoon"
 
-                for tok in cell_tokens:
-                    if tok in first_name_to_full:
-                        matched_faculty = first_name_to_full[tok]
-                        faculty_code = first_name_to_code.get(tok, "")
-                        break
+        if fac_name and fac_name not in sec_ref["faculties_all_day"] and fac_name != "Visiting / None":
+            sec_ref["faculties_all_day"].append(fac_name)
 
-                if not matched_faculty:
-                    matched_faculty = txt
-                    faculty_code = "VISITING"
+        if f_code and fac_name in faculty_day_schedule and not is_off:
+            if dt not in faculty_day_schedule[fac_name]:
+                faculty_day_schedule[fac_name][dt] = []
+            detail = f"{cohort} | Sec {sec} ({session_lbl}) - {c_title}"
+            if detail not in faculty_day_schedule[fac_name][dt]:
+                faculty_day_schedule[fac_name][dt].append(detail)
 
-                if matched_faculty not in faculty_day_schedule:
-                    faculty_day_schedule[matched_faculty] = {}
-
-                detail = f"{cohort} | Sec {sec} ({slot}) - {clean_mod}"
-                if dt not in faculty_day_schedule[matched_faculty]:
-                    faculty_day_schedule[matched_faculty][dt] = []
-                if detail not in faculty_day_schedule[matched_faculty][dt]:
-                    faculty_day_schedule[matched_faculty][dt].append(detail)
-
-                if cohort not in cohort_day_schedule[dt]:
-                    cohort_day_schedule[dt][cohort] = {}
-                if sec not in cohort_day_schedule[dt][cohort]:
-                    cohort_day_schedule[dt][cohort][sec] = {
-                        "module": clean_mod,
-                        "morning": None,
-                        "afternoon": None,
-                        "faculty_name_m": None,
-                        "faculty_name_a": None,
-                        "faculties_all_day": [],
-                    }
-
-                if slot in ["Morning", "Full Day", "Lead"]:
-                    cohort_day_schedule[dt][cohort][sec]["morning"] = faculty_code
-                    cohort_day_schedule[dt][cohort][sec]["faculty_name_m"] = matched_faculty
-                if slot in ["Afternoon", "Full Day", "Assisting"]:
-                    cohort_day_schedule[dt][cohort][sec]["afternoon"] = faculty_code
-                    cohort_day_schedule[dt][cohort][sec]["faculty_name_a"] = matched_faculty
-
-                if (
-                    cohort == "UG-Sem 7"
-                    and matched_faculty not in cohort_day_schedule[dt][cohort][sec]["faculties_all_day"]
-                ):
-                    cohort_day_schedule[dt][cohort][sec]["faculties_all_day"].append(matched_faculty)
-
-    return calendar_cols, official_faculty_list, faculty_day_schedule, cohort_day_schedule, ws
+    return calendar_cols, official_faculty_list, faculty_day_schedule, cohort_day_schedule
 
 try:
-    calendar_cols, official_faculty_list, faculty_schedule, cohort_day_schedule, ws = load_master_data()
+    calendar_cols, official_faculty_list, faculty_schedule, cohort_day_schedule = load_supabase_master_data()
 except Exception as e:
-    st.error(f"Error loading master dataset: {e}")
+    st.error(f"Error loading master dataset from Supabase: {e}")
     st.stop()
 
+try:
+    calendar_cols, official_faculty_list, faculty_schedule, cohort_day_schedule = load_supabase_master_data()
+except Exception as e:
+    st.error(f"Error loading master dataset from Supabase: {e}")
+    st.stop()
 
 # ==========================================================
 # HELPER: RANGE AVAILABILITY & FIRST CLASH DETECTOR
@@ -1008,330 +971,211 @@ with tab3:
 # ==========================================================
 # TAB 4: LIVE CLOUD TIMETABLE & SUBJECT/FACULTY EDITOR (SUPABASE)
 # ==========================================================
-with tab4:
-    st.subheader("⚡ Live Timetable Module Scheduler")
-    st.caption("Assign courses and instructors across dates and sections with live cloud synchronization.")
+# ==========================================================
+# TAB: LIVE EVEN-SEM TIMETABLE GRID EDITOR
+# ==========================================================
+# Cohort metadata for Even Semester
+EVEN_COHORT_SECTIONS = {
+    "UG-Sem 4": ["A", "B", "C", "D", "E"],
+    "UG-Sem 6": ["A", "B", "C", "D"],
+    "UG-Sem 8": ["A", "B", "C"],
+    "PG-Sem 2": ["Combined"],
+    "PG-Sem 4": ["Combined"],
+}
 
-    if not supabase_client:
-        st.warning("⚠️ Supabase is not connected. Configure `SUPABASE_URL` and `SUPABASE_KEY` in `.streamlit/secrets.toml`.")
-    else:
-        # Administrative quick-add drawers
-        with st.expander("⚙️ Roster & Course Quick Tools (Add New)"):
-            c_adm1, c_adm2 = st.columns(2)
-            with c_adm1:
-                st.markdown("**➕ Add Faculty Member**")
-                n_f_code = st.text_input("Faculty ERP Code (e.g., 15999)", key="tb4_f_code")
-                n_f_name = st.text_input("Full Name", key="tb4_f_name")
-                n_f_end = st.date_input("Last Working Date (Optional)", value=None, key="tb4_f_end")
-                if st.button("Save Faculty to Supabase", key="tb4_btn_save_f"):
-                    if n_f_code and n_f_name:
-                        supabase_client.table("faculties").upsert({
-                            "faculty_code": n_f_code.strip(),
-                            "name": n_f_name.strip(),
-                            "first_name_alias": n_f_name.split()[0].lower(),
-                            "active_until": str(n_f_end) if n_f_end else None,
-                            "is_active": True,
-                            "is_available_for_substitution": True
-                        }).execute()
-                        st.success(f"✓ Saved {n_f_name}!")
-                        st.cache_data.clear()
-                        st.rerun()
+st.subheader("⚡ Live Timetable Module Scheduler (Even Semester 2026–27)")
+st.caption("Rapid live scheduling interface mapped directly to the Even Semester grid.")
 
-            with c_adm2:
-                st.markdown("**📚 Add New Subject**")
-                n_c_code = st.text_input("Course Code (e.g., 31204006220)", key="tb4_c_code")
-                n_c_title = st.text_input("Course Title", key="tb4_c_title")
-                n_c_sem = st.selectbox("Semester", ["Sem 2", "Sem 4", "Sem 6", "Sem 3", "Sem 5", "Sem 7", "PG Sem 1", "PG Sem 3"], key="tb4_c_sem")
-                if st.button("Save Subject to Supabase", key="tb4_btn_save_c"):
-                    if n_c_code and n_c_title:
-                        supabase_client.table("courses").upsert({
-                            "course_code": n_c_code.strip(),
-                            "title": n_c_title.strip(),
-                            "semester": n_c_sem,
-                            "semester_type": "EVEN" if n_c_sem in ["Sem 2", "Sem 4", "Sem 6"] else "ODD",
-                            "program_code": "1019" if not n_c_sem.startswith("PG") else "1025"
-                        }).execute()
-                        st.success(f"✓ Saved {n_c_title}!")
-                        st.cache_data.clear()
-                        st.rerun()
+if not supabase_client:
+    st.warning("⚠️ Supabase is not connected. Check your secrets configuration.")
+else:
+    # 1. Scope Controls
+    sc_c1, sc_c2, sc_c3 = st.columns([1.2, 1.2, 1.2])
+    with sc_c1:
+        even_cohort = st.selectbox(
+            "Target Cohort",
+            list(EVEN_COHORT_SECTIONS.keys()),
+            key="even_target_cohort"
+        )
+    with sc_c2:
+        plan_m = st.checkbox("🌅 Morning Session (S1 + S2)", value=True, key="even_plan_m")
+    with sc_c3:
+        plan_a = st.checkbox("🌇 Afternoon Session (S3 + S4)", value=True, key="even_plan_a")
 
-        st.markdown("---")
+    # 2. Date Range Picker
+    dt_c1, dt_c2, dt_c3 = st.columns([1.2, 1.2, 1.2])
+    with dt_c1:
+        st.markdown("<small><b>START DATE</b></small>", unsafe_allow_html=True)
+        even_start_date = st.date_input("Start Date", value=datetime.date(2026, 12, 1), key="even_start_dt", label_visibility="collapsed")
+    with dt_c2:
+        st.markdown("<small><b>END DATE</b></small>", unsafe_allow_html=True)
+        even_end_date = st.date_input("End Date", value=datetime.date(2026, 12, 5), key="even_end_dt", label_visibility="collapsed")
+    with dt_c3:
+        available_secs = EVEN_COHORT_SECTIONS[even_cohort]
+        selected_sections = st.multiselect("Active Sections", options=available_secs, default=available_secs, key="even_active_secs")
 
-        # Global Session Selection Checkboxes & Target Cohort
-        st.markdown("<p style='font-size: 0.88rem; font-weight: 700; color: #1e293b; margin-bottom: 6px;'>SELECT ACTIVE SESSIONS TO CONFIGURE</p>", unsafe_allow_html=True)
-        top_c1, top_c2, top_c3 = st.columns([1.2, 1.2, 1.2])
-        with top_c1:
-            plan_morning = st.checkbox("🌅 Morning Session (S1 + S2)", value=True, key="chk_plan_m")
-        with top_c2:
-            plan_afternoon = st.checkbox("🌇 Afternoon Session (S3 + S4)", value=False, key="chk_plan_a")
-        with top_c3:
-            target_cohort = st.selectbox(
-                "Target Cohort",
-                ["UG-Sem 3", "UG-Sem 5", "UG-Sem 7", "PG-Sem 1", "PG-Sem 3", "UG-Sem 2", "UG-Sem 4", "UG-Sem 6"],
-                key="wf_target_cohort"
-            )
+    st.markdown("---")
 
-        if not plan_morning and not plan_afternoon:
-            st.info("💡 Please check at least one session (Morning and/or Afternoon) to plan.")
+    # 3. Filter course dropdown for selected cohort
+    cohort_sem_keyword = even_cohort.replace("UG-", "").replace("PG-", "").strip()
+    filtered_courses = {
+        k: v for k, v in COURSE_OPTIONS.items()
+        if cohort_sem_keyword.lower() in v.get("sem", "").lower() or v.get("code") == ""
+    }
+    course_list_opts = list(filtered_courses.keys()) if filtered_courses else list(COURSE_OPTIONS.keys())
+    faculty_dropdown_opts = list(DEFAULT_FACULTY_LIST.keys())
 
-        # Common Dates & Sections Row
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-        d_col1, d_col2, d_col3 = st.columns([1.2, 1.2, 0.8])
-        with d_col1:
-            st.markdown("<p style='font-size: 0.82rem; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 4px;'>START DATE</p>", unsafe_allow_html=True)
-            wf_start_date = st.date_input("START DATE", value=datetime.date.today(), label_visibility="collapsed", key="wf_start_date")
-        with d_col2:
-            st.markdown("<p style='font-size: 0.82rem; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 4px;'>END DATE</p>", unsafe_allow_html=True)
-            wf_end_date = st.date_input("END DATE", value=datetime.date.today() + datetime.timedelta(days=4), label_visibility="collapsed", key="wf_end_date")
-        with d_col3:
-            st.markdown("<p style='font-size: 0.82rem; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 4px;'>NUMBER OF SECTIONS</p>", unsafe_allow_html=True)
-            wf_num_sections = st.number_input("NUMBER OF SECTIONS", min_value=1, max_value=5, value=4, step=1, label_visibility="collapsed", key="wf_num_sections")
+    # Helper function for live slot rendering
+    def render_even_section_picker(sec_name, session_code, session_label):
+        st.markdown(f"**Section {sec_name} Faculty**")
+        chosen_fac = st.selectbox(
+            f"Fac {sec_name} ({session_code})",
+            options=faculty_dropdown_opts,
+            key=f"even_{session_code}_fac_{sec_name}",
+            label_visibility="collapsed"
+        )
+        full_fac_name = chosen_fac.split(" (")[0].strip()
 
-        # Red text button styling for Check Availability triggers
+        if st.button("Check Availability", key=f"even_chk_{session_code}_{sec_name}"):
+            if chosen_fac in ["-- None / Leave Empty --", "✏️ [Manual / Custom Entry]"]:
+                st.caption("ℹ️ Select a faculty member first.")
+            else:
+                is_free, free_until, clash_dt, clash_info = check_faculty_availability_in_range(
+                    full_fac_name, even_start_date, even_end_date, session_label
+                )
+                if is_free:
+                    st.success(f"✓ Available ({even_start_date.strftime('%d %b')} – {even_end_date.strftime('%d %b')})")
+                else:
+                    st.error(f"⚠️ Clash on {clash_dt.strftime('%d %b')}: {clash_info}")
+
+        return DEFAULT_FACULTY_LIST.get(chosen_fac, "")
+
+    fac_alloc_m = {}
+    fac_alloc_a = {}
+    m_course_obj = None
+    a_course_obj = None
+
+    # Morning Module Configuration Card
+    if plan_m:
         st.markdown(
             """
-            <style>
-                div[data-testid*="chk_avail_btn_"] button {
-                    color: #dc2626 !important;
-                    background: transparent !important;
-                    border: none !important;
-                    padding: 0px !important;
-                    font-size: 0.82rem !important;
-                    font-weight: 700 !important;
-                    text-decoration: underline !important;
-                    cursor: pointer !important;
-                    height: auto !important;
-                    margin-top: -6px !important;
-                    box-shadow: none !important;
-                }
-                div[data-testid*="chk_avail_btn_"] button:hover {
-                    color: #991b1b !important;
-                    background: transparent !important;
-                }
-                div[data-testid*="chk_avail_btn_"] button:focus:not(:focus-visible) {
-                    box-shadow: none !important;
-                }
-            </style>
+            <div style="background-color: #f8fafc; border-left: 6px solid #2563eb; border-radius: 8px; padding: 12px 18px; margin-bottom: 10px;">
+                <h4 style="margin: 0; color: #1e3a8a;">🌅 Morning Subject & Faculty Allocations</h4>
+            </div>
             """,
             unsafe_allow_html=True
         )
+        m_course_key = st.selectbox("Subject (Morning)", options=course_list_opts, index=0, key="even_m_course")
+        m_course_obj = COURSE_OPTIONS[m_course_key]
 
-        all_section_letters = ["A", "B", "C", "D", "E"]
-        active_sections = all_section_letters[:int(wf_num_sections)]
-        course_keys = list(COURSE_OPTIONS.keys())
-        faculty_opts = list(DEFAULT_FACULTY_LIST.keys())
+        cols_m = st.columns(len(selected_sections) if selected_sections else 1)
+        for idx, sec in enumerate(selected_sections):
+            with cols_m[idx]:
+                fac_alloc_m[sec] = render_even_section_picker(sec, "m", "Morning Session (S1 + S2)")
 
-        def render_section_slot_box(sec, prefix, session_label):
-            st.markdown(f"<p style='font-size: 0.86rem; font-weight: 600; color: #1e293b; margin-bottom: 4px;'>Faculty Section {sec}</p>", unsafe_allow_html=True)
-            f_choice = st.selectbox(
-                f"Faculty Section {sec} ({prefix})",
-                options=faculty_opts,
-                key=f"wf_{prefix}_fac_sec_{sec}",
-                label_visibility="collapsed"
-            )
-            selected_full_name = f_choice.split(" (")[0].strip()
+    # Afternoon Module Configuration Card
+    if plan_a:
+        st.markdown(
+            """
+            <div style="background-color: #f8fafc; border-left: 6px solid #d97706; border-radius: 8px; padding: 12px 18px; margin: 18px 0 10px 0;">
+                <h4 style="margin: 0; color: #78350f;">🌇 Afternoon Subject & Faculty Allocations</h4>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        def_a_idx = 1 if len(course_list_opts) > 1 else 0
+        a_course_key = st.selectbox("Subject (Afternoon)", options=course_list_opts, index=def_a_idx, key="even_a_course")
+        a_course_obj = COURSE_OPTIONS[a_course_key]
 
-            chk_clicked = st.button("Check Availability", key=f"chk_avail_btn_{prefix}_{sec}")
-            if chk_clicked:
-                if f_choice in ["-- None / Leave Empty --", "✏️ [Manual / Custom Entry]"]:
-                    st.caption("ℹ️ Please select an official faculty member to check availability.")
-                else:
-                    is_free, free_until, clash_date, clash_detail = check_faculty_availability_in_range(
-                        selected_full_name, wf_start_date, wf_end_date, session_label
-                    )
+        cols_a = st.columns(len(selected_sections) if selected_sections else 1)
+        for idx, sec in enumerate(selected_sections):
+            with cols_a[idx]:
+                fac_alloc_a[sec] = render_even_section_picker(sec, "a", "Afternoon Session (S3 + S4)")
 
-                    if is_free:
-                        st.markdown(
-                            f"<span style='color: #16a34a; font-weight: 600; font-size: 0.82rem;'>✓ Fully Free ({wf_start_date.strftime('%d %b')} – {wf_end_date.strftime('%d %b')})</span>",
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        if free_until:
-                            st.markdown(
-                                f"<div style='background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 6px 10px; margin-top: 4px; font-size: 0.82rem; color: #991b1b;'>"
-                                f"<b>⚠️ Not Available full duration:</b><br>"
-                                f"• Free until: <b>{free_until.strftime('%d %b %Y')}</b><br>"
-                                f"• Busy on: <b>{clash_date.strftime('%d %b %Y')}</b><br>"
-                                f"<small style='color: #7f1d1d;'>({clash_detail})</small>"
-                                f"</div>",
-                                unsafe_allow_html=True
-                            )
-                        else:
-                            st.markdown(
-                                f"<div style='background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 6px 10px; margin-top: 4px; font-size: 0.82rem; color: #991b1b;'>"
-                                f"<b>⚠️ Busy from Day 1 ({clash_date.strftime('%d %b %Y')}):</b><br>"
-                                f"<small style='color: #7f1d1d;'>{clash_detail}</small>"
-                                f"</div>",
-                                unsafe_allow_html=True
-                            )
-            return DEFAULT_FACULTY_LIST[f_choice]
+    # Optional Room & Block settings
+    with st.expander("⚙️ Room Allocation & Defaults"):
+        r_c1, r_c2, r_c3 = st.columns(3)
+        block_val = r_c1.text_input("Academic Block", value="F", key="even_block_val")
+        room_val = r_c2.text_input("Studio / Lab Room", placeholder="e.g. F2, F3", key="even_room_val")
+        thu_half = r_c3.checkbox("Thursday Afternoon Off (UG)", value=True, key="even_thu_off")
 
-        # ------------------------------------------------------
-        # 1. MORNING SESSION CARD (S1 + S2)
-        # ------------------------------------------------------
-        m_course_info = None
-        fac_per_section_m = {}
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
-        if plan_morning:
-            st.markdown("<hr style='margin: 22px 0; border: none; border-top: 1px solid #cbd5e1;'>", unsafe_allow_html=True)
-            st.markdown(
-                """
-                <div style="background-color: #f8fafc; border: 1px solid #94a3b8; border-left: 6px solid #2563eb; border-radius: 10px; padding: 18px 24px; margin-bottom: 14px;">
-                    <h3 style="margin: 0; color: #0f172a; font-size: 1.5rem; font-weight: 800;">Subject (Morning Session: S1 + S2)</h3>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+    # 4. Push to Cloud
+    if st.button("🚀 Push to Supabase Cloud", type="primary", use_container_width=True, key="even_sync_btn"):
+        if not plan_m and not plan_a:
+            st.error("Select at least one session (Morning or Afternoon).")
+        elif even_start_date > even_end_date:
+            st.error("Start Date cannot be after End Date.")
+        elif plan_m and not m_course_obj.get("code"):
+            st.error("Select a valid Morning subject code.")
+        elif plan_a and not a_course_obj.get("code"):
+            st.error("Select a valid Afternoon subject code.")
+        else:
+            records = []
+            curr = even_start_date
 
-            st.markdown("<p style='font-size: 0.82rem; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 4px;'>SUBJECT NAME (MORNING)</p>", unsafe_allow_html=True)
-            m_course_key = st.selectbox("SUBJECT NAME (MORNING)", options=course_keys, index=0, label_visibility="collapsed", key="wf_m_course_select")
-            m_course_info = COURSE_OPTIONS[m_course_key]
+            while curr <= even_end_date:
+                if curr.weekday() < 5:  # Monday to Friday
+                    d_str = str(curr)
+                    is_thu = curr.weekday() == 3
 
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+                    # Morning slots (1 & 2)
+                    if plan_m:
+                        for s_num in [1, 2]:
+                            for sec in selected_sections:
+                                f_code = fac_alloc_m.get(sec)
+                                records.append({
+                                    "date": d_str,
+                                    "cohort": even_cohort,
+                                    "section": sec,
+                                    "slot_num": s_num,
+                                    "slot_time": SLOT_TIMINGS_MAP[s_num],
+                                    "shift_timing": "09:30 TO 17:30",
+                                    "course_code": m_course_obj["code"],
+                                    "faculty_code": f_code if f_code else None,
+                                    "academic_block": block_val,
+                                    "room": room_val if room_val else None,
+                                    "classification": "PRACTICAL",
+                                    "is_off": False
+                                })
 
-            sec_r1 = active_sections[:3]
-            if sec_r1:
-                cols_r1 = st.columns(3)
-                for idx, sec in enumerate(sec_r1):
-                    with cols_r1[idx]:
-                        fac_per_section_m[sec] = render_section_slot_box(sec, "m", "Morning Session (S1 + S2)")
+                    # Afternoon slots (3 & 4)
+                    if plan_a:
+                        for s_num in [3, 4]:
+                            is_off = (is_thu and thu_half and not even_cohort.startswith("PG"))
+                            for sec in selected_sections:
+                                f_code = fac_alloc_a.get(sec)
+                                records.append({
+                                    "date": d_str,
+                                    "cohort": even_cohort,
+                                    "section": sec,
+                                    "slot_num": s_num,
+                                    "slot_time": SLOT_TIMINGS_MAP[s_num],
+                                    "shift_timing": "09:30 TO 17:30",
+                                    "course_code": a_course_obj["code"],
+                                    "faculty_code": None if is_off else (f_code if f_code else None),
+                                    "academic_block": block_val,
+                                    "room": room_val if room_val else None,
+                                    "classification": "THEORY",
+                                    "is_off": is_off
+                                })
 
-            sec_r2 = active_sections[3:]
-            if sec_r2:
-                st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-                cols_r2 = st.columns(3)
-                for idx, sec in enumerate(sec_r2):
-                    with cols_r2[idx]:
-                        fac_per_section_m[sec] = render_section_slot_box(sec, "m", "Morning Session (S1 + S2)")
+                curr += datetime.timedelta(days=1)
 
-        # ------------------------------------------------------
-        # 2. AFTERNOON SESSION CARD (S3 + S4)
-        # ------------------------------------------------------
-        a_course_info = None
-        fac_per_section_a = {}
-
-        if plan_afternoon:
-            st.markdown("<hr style='margin: 22px 0; border: none; border-top: 1px solid #cbd5e1;'>", unsafe_allow_html=True)
-            st.markdown(
-                """
-                <div style="background-color: #f8fafc; border: 1px solid #94a3b8; border-left: 6px solid #d97706; border-radius: 10px; padding: 18px 24px; margin-bottom: 14px;">
-                    <h3 style="margin: 0; color: #0f172a; font-size: 1.5rem; font-weight: 800;">Subject (Afternoon Session: S3 + S4)</h3>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            st.markdown("<p style='font-size: 0.82rem; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 4px;'>SUBJECT NAME (AFTERNOON)</p>", unsafe_allow_html=True)
-            def_a_idx = 1 if len(course_keys) > 1 else 0
-            a_course_key = st.selectbox("SUBJECT NAME (AFTERNOON)", options=course_keys, index=def_a_idx, label_visibility="collapsed", key="wf_a_course_select")
-            a_course_info = COURSE_OPTIONS[a_course_key]
-
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
-            sec_r1 = active_sections[:3]
-            if sec_r1:
-                cols_r1 = st.columns(3)
-                for idx, sec in enumerate(sec_r1):
-                    with cols_r1[idx]:
-                        fac_per_section_a[sec] = render_section_slot_box(sec, "a", "Afternoon Session (S3 + S4)")
-
-            sec_r2 = active_sections[3:]
-            if sec_r2:
-                st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-                cols_r2 = st.columns(3)
-                for idx, sec in enumerate(sec_r2):
-                    with cols_r2[idx]:
-                        fac_per_section_a[sec] = render_section_slot_box(sec, "a", "Afternoon Session (S3 + S4)")
-
-        st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
-
-        # Optional Settings Drawer
-        with st.expander("🛠️ Advanced Options (Room Allocation & Thursday Half-Day)"):
-            opt_c1, opt_c2, opt_c3 = st.columns(3)
-            with opt_c1:
-                wf_block = opt_c1.text_input("Academic Block", value="F", key="wf_block_val")
-            with opt_c2:
-                wf_room = opt_c2.text_input("Default Room", placeholder="e.g. F2, E10", key="wf_room_val")
-            with opt_c3:
-                wf_skip_thu_afternoon = opt_c3.checkbox("Thursday Afternoon Off (S3 & S4 Off for UG)", value=True, key="wf_thu_off_chk")
-
-        # ------------------------------------------------------
-        # SUBMIT & SYNC TO SUPABASE
-        # ------------------------------------------------------
-        if st.button("🚀 Push Schedule to Supabase Cloud", type="primary", use_container_width=True, key="wf_btn_sync"):
-            if not plan_morning and not plan_afternoon:
-                st.error("Please select at least one session (Morning and/or Afternoon).")
-            elif wf_start_date > wf_end_date:
-                st.error("Start Date must be before or equal to End Date.")
-            elif plan_morning and not m_course_info.get("code"):
-                st.error("Please select a valid Morning subject.")
-            elif plan_afternoon and not a_course_info.get("code"):
-                st.error("Please select a valid Afternoon subject.")
+            if records:
+                try:
+                    supabase_client.table("timetable_slots").upsert(
+                        records,
+                        on_conflict="date,cohort,section,slot_num"
+                    ).execute()
+                    st.success(f"✓ Successfully pushed {len(records)} slot records for {even_cohort}!")
+                    st.cache_data.clear()
+                except Exception as ex:
+                    st.error(f"Error syncing with Supabase: {ex}")
             else:
-                records_to_insert = []
-                cur = wf_start_date
+                st.warning("No working days found in the selected range.")
 
-                while cur <= wf_end_date:
-                    if cur.weekday() < 5:  # Monday to Friday
-                        date_str = str(cur)
-                        is_thu = cur.weekday() == 3
-
-                        # Process Morning Slots (S1, S2)
-                        if plan_morning:
-                            for s_num in [1, 2]:
-                                for sec in active_sections:
-                                    f_code = fac_per_section_m.get(sec)
-                                    records_to_insert.append({
-                                        "date": date_str,
-                                        "cohort": target_cohort,
-                                        "section": sec,
-                                        "slot_num": s_num,
-                                        "slot_time": SLOT_TIMINGS_MAP[s_num],
-                                        "shift_timing": "09:30 TO 17:30",
-                                        "course_code": m_course_info["code"],
-                                        "faculty_code": f_code if f_code else None,
-                                        "academic_block": wf_block,
-                                        "room": wf_room if wf_room else None,
-                                        "classification": "PRACTICAL",
-                                        "is_off": False
-                                    })
-
-                        # Process Afternoon Slots (S3, S4)
-                        if plan_afternoon:
-                            for s_num in [3, 4]:
-                                is_off = (is_thu and wf_skip_thu_afternoon and not target_cohort.startswith("PG"))
-                                for sec in active_sections:
-                                    f_code = fac_per_section_a.get(sec)
-                                    records_to_insert.append({
-                                        "date": date_str,
-                                        "cohort": target_cohort,
-                                        "section": sec,
-                                        "slot_num": s_num,
-                                        "slot_time": SLOT_TIMINGS_MAP[s_num],
-                                        "shift_timing": "09:30 TO 17:30",
-                                        "course_code": a_course_info["code"],
-                                        "faculty_code": None if is_off else (f_code if f_code else None),
-                                        "academic_block": wf_block,
-                                        "room": wf_room if wf_room else None,
-                                        "classification": "THEORY",
-                                        "is_off": is_off
-                                    })
-
-                    cur += datetime.timedelta(days=1)
-
-                if records_to_insert:
-                    try:
-                        supabase_client.table("timetable_slots").upsert(
-                            records_to_insert,
-                            on_conflict="date,cohort,section,slot_num"
-                        ).execute()
-                        st.success(f"✓ Successfully scheduled {len(records_to_insert)} slots for {target_cohort} in Supabase!")
-                        st.cache_data.clear()
-                    except Exception as ex:
-                        st.error(f"Error updating Supabase database: {ex}")
-                else:
-                    st.warning("No instructional days found in selected date range.")
-                    
 # ==========================================================
 # TAB 5: WEEKLY CALENDAR TIMETABLE VIEW
 # ==========================================================
@@ -1574,14 +1418,15 @@ with tab7:
         hours_done = 0.0
         total_scheduled_hrs = 0.0
 
-        for c_info in calendar_cols:
-            col_idx = c_info["col"]
+for c_info in calendar_cols:
             dt = c_info["date"]
 
             matched = False
-            for r in rows_to_check:
-                val = str(ws.cell(r, col_idx).value or "").lower()
-                if any(k in val for k in kws):
+            cohort_key = f"UG-{cohort}" if not cohort.startswith("PG") else cohort
+            day_cohort_data = cohort_day_schedule.get(dt, {}).get(cohort_key, {})
+            for sec, sec_data in day_cohort_data.items():
+                mod_str = (sec_data.get("module") or "").lower()
+                if any(k in mod_str for k in kws):
                     matched = True
                     break
 
